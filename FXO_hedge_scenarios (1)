@@ -1,0 +1,155 @@
+import random
+import numpy as np
+import pandas as pd
+import math
+import matplotlib.pyplot as plt
+import scipy.stats
+import datetime as dt
+
+import FXOption_class
+
+
+#################INHERITANCE IMPLEMENTATION#############
+
+class HedgeNone(object):
+    
+    def __init__(self, revs_unit_price_local, \
+                 mean_volume_log, sigma_volume_log, \
+                 mean_spot_log, sigma_spot_log, var_cost, fixed_cost):
+        
+        self.revs_unit_price_local = revs_unit_price_local  #deterministic price of whatever client sells, say in USD
+        
+        self.mean_volume_log = mean_volume_log   #stochastic expected mean of volumes sold
+        self.sigma_volume_log = sigma_volume_log  #stochastic expected stDev of volumes sold.  
+        
+        self.mean_spot_log = mean_spot_log  #expected FX rate, can use forward
+        self.sigma_spot_log =  sigma_spot_log #expected FX vol, can use at-the money implieds
+        self.var_cost = var_cost
+        self.fixed_cost = fixed_cost
+        
+    #helper method, takes as input lognormal mean and stdev, transforms to normal, and makes a random draw
+    def _draw_volume_(self):#  dont need the other 2 args,mean_volume_log, sigma_volume_log):
+        
+        mean_volume_norm = 2*math.log(self.mean_volume_log) - 0.5*math.log((self.sigma_volume_log**2) \
+                                                                           + self.mean_volume_log **2)
+        variance_volume_norm = -2 * math.log(self.mean_volume_log) + math.log((self.sigma_volume_log **2) + self.mean_volume_log**2)
+        
+        sigma_volume_norm = math.sqrt(variance_volume_norm)
+    
+        volume = np.random.lognormal(mean_volume_norm, sigma_volume_norm)
+        return volume
+    
+    #helper method, takes as input lognormal mean and stdev, transforms to normal, and makes a random draw
+    def _draw_spot_(self):
+        
+        mean_spot_norm = 2*math.log(self.mean_spot_log) - 0.5*math.log((self.sigma_spot_log**2) \
+                                                                       + self.mean_spot_log **2)
+        variance_spot_norm = -2 * math.log(self.mean_spot_log) + math.log((self.sigma_spot_log **2)\
+                                                                     +  self.mean_spot_log**2)
+        sigma_spot_norm = math.sqrt(variance_spot_norm)
+        
+        spot  = np.random.lognormal(mean_spot_norm,sigma_spot_norm)
+    
+        return spot
+    
+    def _payoff_profile_(self):
+        
+        volume = self._draw_volume_()
+        #spot = draw_spot_(self.mean_spot_log, self.sigma_spot_log)  or
+        spot = self._draw_spot_()
+        self.profit = self.revs_unit_price_local * volume - spot * self.var_cost * volume - self.fixed_cost 
+        
+        return self.profit
+
+    def montecarlo(self, num_draws):
+                
+        self.profit_vec = []
+        draws = 0
+        
+        while draws <= num_draws:
+            
+            profit = self._payoff_profile_()
+            self.profit_vec.append(profit)  
+            draws += 1
+   
+        self.mean_profit = np.mean(self.profit_vec)
+        self.min_profit = min(self.profit_vec)
+        self.std_profit = np.std(self.profit_vec)
+        self.skew_profit = scipy.stats.skew(self.profit_vec)
+        
+        return (self.mean_profit, self.min_profit, self.std_profit, self.skew_profit)
+         
+    def display(self, num_draws):
+        
+        self.montecarlo(num_draws)
+        print('mean '+str(self.mean_profit))
+        print('stDev: '+str(self.std_profit)) 
+        print('min :' +str(self.min_profit))
+        print('skew :' +str(self.skew_profit))
+        count, bins, ignored = plt.hist(self.profit_vec , 100, normed = True, color = 'orange')
+        plt.plot()
+    
+    def __str__(self):
+        return "(%0.2f, %0.2f)"%(self.revs_unit_price_local, self.mean_volume_log)
+   
+#############
+
+class HedgeForward(HedgeNone):
+    def __init__(self,  revs_unit_price_local, \
+                 mean_volume_log, sigma_volume_log, \
+                 mean_spot_log, sigma_spot_log, var_cost, fixed_cost):
+        
+        HedgeNone.__init__(self, revs_unit_price_local, \
+                           mean_volume_log, sigma_volume_log, \
+                           mean_spot_log, sigma_spot_log, var_cost, fixed_cost)
+        
+
+    #def _payoff_profile_forward_(self):
+    def _payoff_profile_(self):
+        
+        volume = self._draw_volume_()
+        #spot = draw_spot_(self.mean_spot_log, self.sigma_spot_log)  or
+        spot = self._draw_spot_()
+    
+        hedge_notional = self.mean_volume_log*self.var_cost  #hedging with full expected revenue
+        forward_rate_t0 = self.mean_spot_log #can make it actual forward later 
+        
+        self.profit = self.revs_unit_price_local * volume - spot * self.var_cost * volume - self.fixed_cost +hedge_notional*\
+            (spot - forward_rate_t0)
+            
+        return self.profit
+  
+###################        
+class HedgeFXO(HedgeNone):
+    
+    def __init__(self, revs_unit_price_local, \
+                 mean_volume_log, sigma_volume_log, \
+                 mean_spot_log, sigma_spot_log, var_cost, fixed_cost):
+        
+        HedgeNone.__init__(self, revs_unit_price_local, \
+                           mean_volume_log, sigma_volume_log, \
+                           mean_spot_log, sigma_spot_log, var_cost, fixed_cost)
+        
+    def _payoff_profile_(self): 
+        
+        volume = self._draw_volume_()
+        spot = self._draw_spot_()
+        
+        hedge_notional = self.mean_volume_log * self.var_cost
+        strike = self.mean_spot_log
+        premium = FXOption_class.FXOption("Call", self.mean_spot_log,  self.mean_spot_log,  0.14,  0.0, 0.0, \
+                                               1.0,  (self.mean_volume_log * self.mean_spot_log), "").price()
+        
+        self.profit = self.revs_unit_price_local * volume - spot * self.var_cost *volume - self.fixed_cost + hedge_notional * \
+        max(spot - strike, 0.0) - premium
+        return(self.profit)
+    
+#forward = HedgeForward()
+#TypeError: __init__() missing 7 required positional arguments: 'revs_unit_price_local', 'mean_volume_log', 
+#'sigma_volume_log', 'mean_spot_log', 'sigma_spot_log', 'var_cost', and 'fixed_cost'
+
+#forward = HedgeForward(1350,  25000, 2500,  1.22, 0.122, 1000, 1000000)
+#TypeError: __init__() takes 1 positional argument but 8 were given
+forward = HedgeForward(1350,  25000, 2500,  1.22, 0.122, 1000, 1000000)
+#forward._payoff_profile_forward_()
+forward.display(10000)  
